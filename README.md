@@ -1,33 +1,33 @@
-## Database schema design (Drizzle + PostgreSQL)
+## Database schema (Drizzle + PostgreSQL)
 
-This module stores exactly two kinds of data extracted from text‑based PDFs (assume that given pdfs are text based):
+Stores two types of data from text‑based PDFs:
 
 - Company profile (one row per document)
-- Financial highlights (one row per table cell, so we keep all periods/metrics)
+- Financial highlights (one row per table cell, keeps all periods/metrics)
 
-We also keep a tiny `documents` table for lineage and idempotency.
+Also has a small `documents` table to track files and avoid duplicates.
 
-### Why it’s modeled this way
+### Why it's set up this way
 
-- Financial highlights are matrix‑shaped in the PDF. Storing them as tall, atomic rows keeps the schema future‑proof and makes analytics (pivot, aggregation) straightforward.
-- Variance values live alongside actuals as separate rows with `value_kind = 'variance_pct'` so you can filter or compare easily.
-- Provenance is inline (`source_page`, `source_quote`) so you can always show users where a value came from without extra joins.
+- Financial highlights come as tables in the PDF. Storing each cell as its own row makes the schema flexible and queries easier.
+- Variance values are stored as separate rows with `value_kind = 'variance_pct'` so filtering and comparing is simple.
+- Source info is stored directly (`source_page`, `source_quote`) so you can show where each value came from without extra joins.
 
 ---
 
 ## Tables
 
 ### documents
-One record per processed PDF. Used to de‑dupe by hash and for basic lineage.
+One record per processed PDF. Used to avoid duplicates by file hash and track which files were processed.
 
-Columns (PostgreSQL types):
+Columns:
 - id UUID PK
 - filename TEXT
 - sha256 TEXT (file hash)
 - page_count INT
 - created_at TIMESTAMPTZ default now()
 
-Reference implementation:
+Code:
 
 ```1:11:/Users/tanchu/Documents/programming/test/mirarc-test/src/db/schema.ts
 import { pgEnum, pgTable, text, uuid, integer, timestamp, numeric, index } from 'drizzle-orm/pg-core';
@@ -44,7 +44,7 @@ export const documents = pgTable('documents', {
 ```
 
 ### company_profiles
-One row per document capturing the company info required by the exam.
+One row per document with the company info needed for the exam.
 
 Columns:
 - id UUID PK
@@ -55,11 +55,11 @@ Columns:
 - fund_role TEXT
 - first_investment_date DATE
 - investment_type TEXT
-- source_page INT (where we read the company info)
-- source_quote TEXT (short snippet for audit)
+- source_page INT (page number where the company info was found)
+- source_quote TEXT (short text snippet for reference)
 - created_at TIMESTAMPTZ default now()
 
-Reference implementation:
+Code:
 
 ```13:32:/Users/tanchu/Documents/programming/test/mirarc-test/src/db/schema.ts
 export const companyProfiles = pgTable(
@@ -84,21 +84,21 @@ export const companyProfiles = pgTable(
 ```
 
 Notes
-- We soft‑enforce uniqueness in code with upsert on `(document_id, name)` so re‑runs don’t duplicate.
-- The name index helps quick lookups and de‑dupe checks.
+- Duplicates are avoided by checking `(document_id, name)` before inserting, so re‑runs won't create duplicates.
+- The name index speeds up lookups and duplicate checks.
 
 ### financial_metrics
-Every visible cell in the Financial highlights tables becomes one row here. This preserves columns like “Dec‑24 YTD Actual”, “FY2021 Actual”, and “Variance to Prior Year (%)”.
+Every cell in the Financial highlights tables becomes one row here. Keeps the original column names like "Dec‑24 YTD Actual", "FY2021 Actual", and "Variance to Prior Year (%)".
 
 Columns:
 - id UUID PK
 - company_profile_id UUID FK → company_profiles(id)
-- currency TEXT (parsed from header like “In KRW bn”)
+- currency TEXT (pulled from header like "In KRW bn")
 - unit TEXT (e.g., `bn`, `pct`)
 - source_label TEXT NOT NULL (the row label as shown, e.g., `EBITDA margin (%)`)
 - metric_name TEXT NOT NULL (normalized snake_case, e.g., `ebitda_margin_pct`)
 - column_label TEXT NOT NULL (original column header)
-- fiscal_year INT (derived when present; e.g., 2024, 2023, 2021)
+- fiscal_year INT (figured out from the label when present; e.g., 2024, 2023, 2021)
 - period_kind period_kind ENUM (`YTD` | `FY`)
 - period_label TEXT (e.g., `Dec-24`, `FY2021`)
 - value NUMERIC NULL (nullable, some cells can be empty)
@@ -106,7 +106,7 @@ Columns:
 - source_page INT
 - source_quote TEXT
 
-Reference implementation:
+Code:
 
 ```34:56:/Users/tanchu/Documents/programming/test/mirarc-test/src/db/schema.ts
 export const financialMetrics = pgTable('financial_metrics', {
@@ -136,9 +136,9 @@ How variance works
   - (metric_name=`revenue`, column_label=`Dec-23 YTD Actual`, value=745.3, period_kind=`YTD`, fiscal_year=2023, period_label=`Dec-23`)
   - (metric_name=`revenue`, column_label=`Variance to Prior Year (%)`, value=6.4, value_kind=`variance_pct`, unit=`pct`, period_kind=`YTD`, fiscal_year=2024, period_label=`Dec-24`)
 
-Idempotency key (enforced in code)
-- `(company_profile_id, metric_name, column_label, value_kind)`
-  - This keeps re‑runs from creating duplicates while preserving the original column headers.
+How duplicates are avoided
+- Uses `(company_profile_id, metric_name, column_label, value_kind)` as a unique key
+  - This prevents duplicates when re‑running while keeping the original column names.
 
 ---
 
@@ -187,11 +187,11 @@ LIMIT 1;
 
 ---
 
-## Notes & assumptions
+## Notes
 
-- PDFs are text‑based; no OCR in scope.
-- We derive `currency` and `unit` from header lines like “In KRW bn”. Percents are stored as numeric `value` with `unit='pct'`.
-- `value` is nullable by design to allow empty cells.
-- Time periods are derived from labels (e.g., “Dec‑24 YTD Actual”, “FY2023 Actual”).
+- PDFs are text‑based; no OCR needed.
+- `currency` and `unit` are pulled from header lines like "In KRW bn". Percents are stored as numeric `value` with `unit='pct'`.
+- `value` can be null to handle empty cells.
+- Time periods are figured out from labels (e.g., "Dec‑24 YTD Actual", "FY2023 Actual").
 
 
